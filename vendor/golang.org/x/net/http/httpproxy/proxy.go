@@ -3,8 +3,8 @@
 // license that can be found in the LICENSE file.
 
 // Package httpproxy provides support for HTTP proxy determination
-// based on environment variables, as provided by net/http's
-// ProxyFromEnvironment function.
+// based on environment variables, as provided by
+// [net/http.ProxyFromEnvironment] function.
 //
 // The API is not subject to the Go 1 compatibility promise and may change at
 // any time.
@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -55,7 +56,7 @@ type Config struct {
 	// presence of a REQUEST_METHOD environment variable).
 	// When this is set, ProxyForURL will return an error
 	// when HTTPProxy applies, because a client could be
-	// setting HTTP_PROXY maliciously. See https://golang.org/s/cgihttpproxy.
+	// setting HTTP_PROXY maliciously. See https://go.dev/s/cgihttpproxy.
 	CGI bool
 }
 
@@ -81,8 +82,7 @@ type config struct {
 
 // FromEnvironment returns a Config instance populated from the
 // environment variables HTTP_PROXY, HTTPS_PROXY and NO_PROXY (or the
-// lowercase versions thereof). HTTPS_PROXY takes precedence over
-// HTTP_PROXY for https requests.
+// lowercase versions thereof).
 //
 // The environment values may be either a complete URL or a
 // "host[:port]", in which case the "http" scheme is assumed. An error
@@ -113,8 +113,8 @@ func getEnvAny(names ...string) string {
 // environment, or a proxy should not be used for the given request, as
 // defined by NO_PROXY.
 //
-// As a special case, if req.URL.Host is "localhost" (with or without a
-// port number), then a nil URL and nil error will be returned.
+// As a special case, if reqURL.Host is "localhost" or a loopback address
+// (with or without a port number), then a nil URL and nil error will be returned.
 func (cfg *Config) ProxyFunc() func(reqURL *url.URL) (*url.URL, error) {
 	// Preprocess the Config settings for more efficient evaluation.
 	cfg1 := &config{
@@ -150,10 +150,7 @@ func parseProxy(proxy string) (*url.URL, error) {
 	}
 
 	proxyURL, err := url.Parse(proxy)
-	if err != nil ||
-		(proxyURL.Scheme != "http" &&
-			proxyURL.Scheme != "https" &&
-			proxyURL.Scheme != "socks5") {
+	if err != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
 		// proxy was bogus. Try prepending "http://" to it and
 		// see if that parses correctly. If not, we fall
 		// through and complain about the original one.
@@ -181,8 +178,10 @@ func (cfg *config) useProxy(addr string) bool {
 	if host == "localhost" {
 		return false
 	}
-	ip := net.ParseIP(host)
-	if ip != nil {
+	nip, err := netip.ParseAddr(host)
+	var ip net.IP
+	if err == nil {
+		ip = net.IP(nip.AsSlice())
 		if ip.IsLoopback() {
 			return false
 		}
@@ -266,6 +265,9 @@ func (c *config) init() {
 		if phost[0] != '.' {
 			matchHost = true
 			phost = "." + phost
+		}
+		if v, err := idnaASCII(phost); err == nil {
+			phost = v
 		}
 		c.domainMatchers = append(c.domainMatchers, domainMatch{host: phost, port: pport, matchHost: matchHost})
 	}
@@ -361,6 +363,9 @@ type domainMatch struct {
 }
 
 func (m domainMatch) match(host, port string, ip net.IP) bool {
+	if ip != nil {
+		return false
+	}
 	if strings.HasSuffix(host, m.host) || (m.matchHost && host == m.host[1:]) {
 		return m.port == "" || m.port == port
 	}
